@@ -23,7 +23,7 @@ const getAllRooms = async ({ status, floor, typeId } = {}) => {
       rt.description AS type_description,
       rt.amenities,
       '' AS image_url,
-      res.id AS current_reservation_id,
+      res.current_reservation_id,
       res.reservation_code,
       res.guest_name,
       res.guest_phone,
@@ -38,7 +38,7 @@ const getAllRooms = async ({ status, floor, typeId } = {}) => {
       res.total_amount,
       res.paid_amount,
       res.payment_status,
-      res.status AS reservation_status,
+      res.reservation_status,
       NULL AS vip_customer_id,
       NULL AS vip_name,
       NULL AS vip_tier,
@@ -46,8 +46,25 @@ const getAllRooms = async ({ status, floor, typeId } = {}) => {
     FROM rooms r
     JOIN room_types rt ON r.room_type_id = rt.id
     LEFT JOIN LATERAL (
-      SELECT *
+      SELECT 
+        rr.id AS current_reservation_id,
+        rr.reservation_code,
+        COALESCE(c.full_name, '') AS guest_name,
+        COALESCE(c.phone, '') AS guest_phone,
+        COALESCE(c.id_number, '') AS guest_id_number,
+        COALESCE(rr.id_image_url, '') AS id_image_url,
+        COALESCE(rr.special_requests, '') AS special_requests,
+        rr.check_in_date,
+        rr.check_out_date,
+        rr.actual_check_in AS actual_check_in_at,
+        rr.rate_per_night,
+        COALESCE(rr.nights, 1) AS total_nights,
+        COALESCE(rr.total_amount, 0) AS total_amount,
+        0 AS paid_amount,
+        rr.payment_status,
+        rr.status AS reservation_status
       FROM room_reservations rr
+      LEFT JOIN customers c ON rr.customer_id = c.id
       WHERE rr.room_id = r.id
         AND rr.status IN ('checked_in', 'confirmed')
       ORDER BY 
