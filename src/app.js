@@ -70,6 +70,21 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
+// Auto-sync full database schema on incoming requests
+const { syncFullSchema } = require("./database/syncSchema");
+let schemaSynced = false;
+app.use(async (req, res, next) => {
+  if (!schemaSynced) {
+    try {
+      await syncFullSchema();
+      schemaSynced = true;
+    } catch (e) {
+      console.warn("Auto-sync notice:", e.message);
+    }
+  }
+  next();
+});
+
 // Root route for cPanel health checks & browser visits
 app.get('/', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -79,6 +94,16 @@ app.get('/', (req, res) => {
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ success: true, system: 'Tabor Hotel', version: '1.0.0', timestamp: new Date().toISOString() });
+});
+
+// Schema full sync manual endpoint
+app.get('/api/sync-schema', async (req, res) => {
+  try {
+    const result = await syncFullSchema();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Database diagnostics endpoint
