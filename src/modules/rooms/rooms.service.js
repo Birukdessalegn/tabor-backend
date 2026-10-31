@@ -1,4 +1,4 @@
-﻿const pool = require("../../database/pool");
+const pool = require("../../database/pool");
 
 /**
  * Get all rooms with optional filtering (status, floor, type)
@@ -11,16 +11,18 @@ const getAllRooms = async ({ status, floor, typeId } = {}) => {
       r.room_number,
       r.floor,
       r.status,
-      COALESCE(r.notes, r.description, '') AS notes,
+      COALESCE(r.description, '') AS notes,
+      COALESCE(r.description, '') AS description,
       r.created_at,
       r.updated_at,
       rt.id AS room_type_id,
       rt.name AS type_name,
       rt.base_rate,
-      COALESCE(rt.capacity, rt.max_occupancy, 2) AS capacity,
+      COALESCE(rt.max_occupancy, 2) AS capacity,
+      COALESCE(rt.max_occupancy, 2) AS max_occupancy,
       rt.description AS type_description,
       rt.amenities,
-      COALESCE(rt.image_url, '') AS image_url,
+      '' AS image_url,
       res.id AS current_reservation_id,
       res.reservation_code,
       res.guest_name,
@@ -93,16 +95,18 @@ const getRoomById = async (id) => {
       r.room_number,
       r.floor,
       r.status,
-      COALESCE(r.notes, r.description, '') AS notes,
+      COALESCE(r.description, '') AS notes,
+      COALESCE(r.description, '') AS description,
       r.created_at,
       r.updated_at,
       rt.id AS room_type_id,
       rt.name AS type_name,
       rt.base_rate,
-      COALESCE(rt.capacity, rt.max_occupancy, 2) AS capacity,
+      COALESCE(rt.max_occupancy, 2) AS capacity,
+      COALESCE(rt.max_occupancy, 2) AS max_occupancy,
       rt.description AS type_description,
       rt.amenities,
-      rt.image_url
+      '' AS image_url
     FROM rooms r
     JOIN room_types rt ON r.room_type_id = rt.id
     WHERE r.id = $1
@@ -111,14 +115,14 @@ const getRoomById = async (id) => {
   return rows[0] || null;
 };
 
-const createRoom = async ({ room_number, room_type_id, floor, notes, status = "available" }) => {
+const createRoom = async ({ room_number, room_type_id, floor, notes, description, status = "available" }) => {
   const existing = await pool.query("SELECT id FROM rooms WHERE LOWER(room_number) = LOWER($1)", [room_number]);
   if (existing.rows.length > 0) {
     throw new Error(`Room number '${room_number}' already exists.`);
   }
 
   const query = `
-    INSERT INTO rooms (room_number, room_type_id, floor, status, notes)
+    INSERT INTO rooms (room_number, room_type_id, floor, status, description)
     VALUES ($1, $2, $3, $4, $5)
     RETURNING *
   `;
@@ -127,12 +131,16 @@ const createRoom = async ({ room_number, room_type_id, floor, notes, status = "a
     room_type_id,
     floor || 1,
     status,
-    notes || null
+    notes || description || null
   ]);
-  return rows[0];
+  const row = rows[0];
+  if (row) {
+    row.notes = row.description;
+  }
+  return row;
 };
 
-const updateRoom = async (id, { room_number, room_type_id, floor, status, notes }) => {
+const updateRoom = async (id, { room_number, room_type_id, floor, status, notes, description }) => {
   if (room_number) {
     const existing = await pool.query(
       "SELECT id FROM rooms WHERE LOWER(room_number) = LOWER($1) AND id != $2",
@@ -143,6 +151,8 @@ const updateRoom = async (id, { room_number, room_type_id, floor, status, notes 
     }
   }
 
+  const noteVal = notes !== undefined ? notes : (description !== undefined ? description : null);
+
   const query = `
     UPDATE rooms
     SET 
@@ -150,7 +160,7 @@ const updateRoom = async (id, { room_number, room_type_id, floor, status, notes 
       room_type_id = COALESCE($2, room_type_id),
       floor = COALESCE($3, floor),
       status = COALESCE($4, status),
-      notes = COALESCE($5, notes),
+      description = COALESCE($5, description),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = $6
     RETURNING *
@@ -160,10 +170,14 @@ const updateRoom = async (id, { room_number, room_type_id, floor, status, notes 
     room_type_id || null,
     floor || null,
     status || null,
-    notes !== undefined ? notes : null,
+    noteVal,
     id
   ]);
-  return rows[0];
+  const row = rows[0];
+  if (row) {
+    row.notes = row.description;
+  }
+  return row;
 };
 
 const updateRoomStatus = async (id, status, notes) => {
@@ -176,13 +190,17 @@ const updateRoomStatus = async (id, status, notes) => {
     UPDATE rooms
     SET 
       status = $1,
-      notes = COALESCE($2, notes),
+      description = COALESCE($2, description),
       updated_at = CURRENT_TIMESTAMP
     WHERE id = $3
     RETURNING *
   `;
   const { rows } = await pool.query(query, [status, notes || null, id]);
-  return rows[0];
+  const row = rows[0];
+  if (row) {
+    row.notes = row.description;
+  }
+  return row;
 };
 
 const deleteRoom = async (id) => {
@@ -204,7 +222,15 @@ const deleteRoom = async (id) => {
 const getAllRoomTypes = async () => {
   const query = `
     SELECT 
-      rt.*,
+      rt.id,
+      rt.name,
+      rt.description,
+      rt.base_rate,
+      COALESCE(rt.max_occupancy, 2) AS capacity,
+      COALESCE(rt.max_occupancy, 2) AS max_occupancy,
+      rt.amenities,
+      '' AS image_url,
+      rt.created_at,
       COUNT(r.id)::int AS total_rooms,
       COUNT(r.id) FILTER (WHERE r.status = 'available')::int AS available_rooms
     FROM room_types rt
@@ -217,52 +243,72 @@ const getAllRoomTypes = async () => {
 };
 
 const getRoomTypeById = async (id) => {
-  const query = `SELECT * FROM room_types WHERE id = $1`;
+  const query = `
+    SELECT 
+      id,
+      name,
+      description,
+      base_rate,
+      COALESCE(max_occupancy, 2) AS capacity,
+      COALESCE(max_occupancy, 2) AS max_occupancy,
+      amenities,
+      '' AS image_url,
+      created_at
+    FROM room_types WHERE id = $1
+  `;
   const { rows } = await pool.query(query, [id]);
   return rows[0] || null;
 };
 
-const createRoomType = async ({ name, base_rate, capacity, description, amenities, image_url }) => {
+const createRoomType = async ({ name, base_rate, capacity, max_occupancy, description, amenities }) => {
+  const occVal = capacity || max_occupancy || 2;
   const query = `
-    INSERT INTO room_types (name, base_rate, capacity, description, amenities, image_url)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO room_types (name, base_rate, max_occupancy, description, amenities)
+    VALUES ($1, $2, $3, $4, $5)
     RETURNING *
   `;
   const { rows } = await pool.query(query, [
     name.trim(),
     base_rate,
-    capacity || 2,
+    occVal,
     description || null,
-    JSON.stringify(amenities || []),
-    image_url || null
+    Array.isArray(amenities) ? amenities : []
   ]);
-  return rows[0];
+  const row = rows[0];
+  if (row) {
+    row.capacity = row.max_occupancy;
+    row.image_url = '';
+  }
+  return row;
 };
 
-const updateRoomType = async (id, { name, base_rate, capacity, description, amenities, image_url }) => {
+const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, description, amenities }) => {
+  const occVal = capacity || max_occupancy || null;
   const query = `
     UPDATE room_types
     SET 
       name = COALESCE($1, name),
       base_rate = COALESCE($2, base_rate),
-      capacity = COALESCE($3, capacity),
+      max_occupancy = COALESCE($3, max_occupancy),
       description = COALESCE($4, description),
-      amenities = COALESCE($5, amenities),
-      image_url = COALESCE($6, image_url),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = $7
+      amenities = COALESCE($5, amenities)
+    WHERE id = $6
     RETURNING *
   `;
   const { rows } = await pool.query(query, [
     name ? name.trim() : null,
     base_rate || null,
-    capacity || null,
+    occVal,
     description !== undefined ? description : null,
-    amenities ? JSON.stringify(amenities) : null,
-    image_url !== undefined ? image_url : null,
+    amenities !== undefined ? (Array.isArray(amenities) ? amenities : []) : null,
     id
   ]);
-  return rows[0];
+  const row = rows[0];
+  if (row) {
+    row.capacity = row.max_occupancy;
+    row.image_url = '';
+  }
+  return row;
 };
 
 const deleteRoomType = async (id) => {
