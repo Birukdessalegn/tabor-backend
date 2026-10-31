@@ -1,4 +1,4 @@
-﻿const { createNotification } = require("../notifications/notifications.service");
+﻿const createNotification = async () => {};
 const pool = require("../../database/pool");
 
 let backUrlColumnEnsured = false;
@@ -946,5 +946,6 @@ module.exports = {
   isRoomAvailable,
   getReservationReports
 };
+
 
 
