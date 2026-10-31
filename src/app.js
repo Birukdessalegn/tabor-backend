@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
@@ -69,6 +69,12 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+
+// Root route for cPanel health checks & browser visits
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send('<!DOCTYPE html><html><head><title>Tabor Hotel API</title></head><body><h1>Tabor Hotel API is running</h1><p>Status: Healthy</p></body></html>');
+});
 
 // Health check
 app.get('/api/health', (req, res) => {

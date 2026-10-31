@@ -11,16 +11,16 @@ const getAllRooms = async ({ status, floor, typeId } = {}) => {
       r.room_number,
       r.floor,
       r.status,
-      r.notes,
+      COALESCE(r.notes, r.description, '') AS notes,
       r.created_at,
       r.updated_at,
       rt.id AS room_type_id,
       rt.name AS type_name,
       rt.base_rate,
-      rt.capacity,
+      COALESCE(rt.capacity, rt.max_occupancy, 2) AS capacity,
       rt.description AS type_description,
       rt.amenities,
-      rt.image_url,
+      COALESCE(rt.image_url, '') AS image_url,
       res.id AS current_reservation_id,
       res.reservation_code,
       res.guest_name,
@@ -93,13 +93,13 @@ const getRoomById = async (id) => {
       r.room_number,
       r.floor,
       r.status,
-      r.notes,
+      COALESCE(r.notes, r.description, '') AS notes,
       r.created_at,
       r.updated_at,
       rt.id AS room_type_id,
       rt.name AS type_name,
       rt.base_rate,
-      rt.capacity,
+      COALESCE(rt.capacity, rt.max_occupancy, 2) AS capacity,
       rt.description AS type_description,
       rt.amenities,
       rt.image_url
@@ -305,5 +305,6 @@ module.exports = {
   deleteRoomType,
   getRoomStats
 };
+
 
 
