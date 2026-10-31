@@ -1,7 +1,7 @@
--- Tabor Hotel Database Schema
--- Only room reservation related tables
+﻿-- Tabor Hotel Database Schema
+-- Standalone Room Reservation & Front Desk System
 
--- Users table (for Tabor staff: admin, receptionist)
+-- Users table (admin, receptionist, supervisor)
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username VARCHAR(100) UNIQUE NOT NULL,
@@ -29,9 +29,9 @@ CREATE TABLE IF NOT EXISTS room_types (
 CREATE TABLE IF NOT EXISTS rooms (
   id SERIAL PRIMARY KEY,
   room_number VARCHAR(20) UNIQUE NOT NULL,
-  floor INTEGER,
+  floor INTEGER DEFAULT 1,
   room_type_id INTEGER REFERENCES room_types(id),
-  status VARCHAR(50) DEFAULT 'available' CHECK (status IN ('available', 'occupied', 'maintenance', 'reserved')),
+  status VARCHAR(50) DEFAULT 'available' CHECK (status IN ('available', 'occupied', 'maintenance', 'reserved', 'cleaning')),
   description TEXT,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS room_reservations (
   payment_status VARCHAR(50) DEFAULT 'unpaid' CHECK (payment_status IN ('unpaid', 'partial', 'paid')),
   special_requests TEXT,
   notes TEXT,
+  id_image_url TEXT,
+  id_image_front_url TEXT,
+  id_image_back_url TEXT,
+  transaction_reference VARCHAR(100),
+  receipt_image TEXT,
   created_by INTEGER REFERENCES users(id),
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
@@ -86,6 +91,7 @@ CREATE TABLE IF NOT EXISTS room_payments (
   payment_date TIMESTAMP DEFAULT NOW(),
   reference_number VARCHAR(100),
   notes TEXT,
+  receipt_image TEXT,
   received_by INTEGER REFERENCES users(id),
   created_at TIMESTAMP DEFAULT NOW()
 );
@@ -97,4 +103,3 @@ CREATE INDEX IF NOT EXISTS idx_room_reservations_status ON room_reservations(sta
 CREATE INDEX IF NOT EXISTS idx_room_reservations_check_in ON room_reservations(check_in_date);
 CREATE INDEX IF NOT EXISTS idx_room_payments_reservation_id ON room_payments(reservation_id);
 CREATE INDEX IF NOT EXISTS idx_rooms_status ON rooms(status);
-

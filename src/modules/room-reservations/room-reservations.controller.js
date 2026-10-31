@@ -1,128 +1,324 @@
-const service = require('./room-reservations.service');
+const reservationsService = require("./room-reservations.service");
+const path = require("path");
+const fs = require("fs");
 
-async function getRooms(req, res) {
-  try {
-    const rooms = await service.getRooms(req.query);
-    res.json({ success: true, rooms });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+const saveBase64Image = (base64Str) => {
+  if (!base64Str || typeof base64Str !== "string" || !base64Str.startsWith("data:image/")) {
+    return base64Str;
   }
-}
-
-async function getAvailableRooms(req, res) {
   try {
-    const { check_in, check_out } = req.query;
-    if (!check_in || !check_out) {
-      return res.status(400).json({ success: false, message: 'check_in and check_out dates required' });
+    const matches = base64Str.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
+    if (!matches || matches.length < 3) return base64Str;
+    const ext = matches[1] === "jpeg" ? "jpg" : matches[1];
+    const dataBuffer = Buffer.from(matches[2], "base64");
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const filename = `guest-id-${uniqueSuffix}.${ext}`;
+    const uploadDir = path.join(__dirname, "../../../uploads/guest-ids");
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
     }
-    const rooms = await service.getAvailableRooms(check_in, check_out);
-    res.json({ success: true, rooms });
+    fs.writeFileSync(path.join(uploadDir, filename), dataBuffer);
+    return `/uploads/guest-ids/${filename}`;
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("Error saving base64 ID image:", err);
+    return base64Str;
   }
-}
-
-async function getRoomTypes(req, res) {
-  try {
-    const roomTypes = await service.getRoomTypes();
-    res.json({ success: true, roomTypes });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function getReservations(req, res) {
-  try {
-    const reservations = await service.getReservations(req.query);
-    res.json({ success: true, reservations });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function getReservationById(req, res) {
-  try {
-    const reservation = await service.getReservationById(req.params.id);
-    if (!reservation) return res.status(404).json({ success: false, message: 'Not found' });
-    res.json({ success: true, reservation });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function createReservation(req, res) {
-  try {
-    const result = await service.createReservation(req.body, req.user.id);
-    res.status(201).json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function updateReservationStatus(req, res) {
-  try {
-    const { status } = req.body;
-    if (!status) return res.status(400).json({ success: false, message: 'Status required' });
-    await service.updateReservationStatus(req.params.id, status, req.user.id);
-    res.json({ success: true, message: `Reservation status updated to ${status}` });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function amendReservationPrice(req, res) {
-  try {
-    const { new_rate_per_night, reason } = req.body;
-    if (!new_rate_per_night || !reason) {
-      return res.status(400).json({ success: false, message: 'New rate and reason required' });
-    }
-    const result = await service.amendReservationPrice(
-      req.params.id, new_rate_per_night, reason, req.user.id
-    );
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function recordPayment(req, res) {
-  try {
-    const result = await service.recordPayment(req.params.id, req.body, req.user.id);
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function getCustomers(req, res) {
-  try {
-    const customers = await service.getCustomers(req.query.search);
-    res.json({ success: true, customers });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-async function getDashboardStats(req, res) {
-  try {
-    const stats = await service.getDashboardStats();
-    res.json({ success: true, stats });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-}
-
-module.exports = {
-  getRooms,
-  getAvailableRooms,
-  getRoomTypes,
-  getReservations,
-  getReservationById,
-  createReservation,
-  updateReservationStatus,
-  amendReservationPrice,
-  recordPayment,
-  getCustomers,
-  getDashboardStats,
 };
 
+const getReservations = async (req, res) => {
+  try {
+    const { status, search, startDate, endDate, roomId, limit, offset } = req.query;
+    const data = await reservationsService.getAllReservations({
+      status,
+      search,
+      startDate,
+      endDate,
+      roomId,
+      limit: limit ? parseInt(limit, 10) : 100,
+      offset: offset ? parseInt(offset, 10) : 0,
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error("Error fetching reservations:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const getReservation = async (req, res) => {
+  try {
+    const reservation = await reservationsService.getReservationById(req.params.id);
+    if (!reservation) {
+      return res.status(404).json({ success: false, message: "Reservation not found" });
+    }
+    res.json({ success: true, data: reservation });
+  } catch (error) {
+    console.error("Error fetching reservation:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const createReservation = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const payload = { ...req.body };
+    if (!payload.id_image_url && payload.id_image_preview) {
+      payload.id_image_url = payload.id_image_preview;
+    }
+    if (payload.id_image_url && payload.id_image_url.startsWith("data:image/")) {
+      payload.id_image_url = saveBase64Image(payload.id_image_url);
+    }
+    if (!payload.id_image_back_url && payload.id_image_back_preview) {
+      payload.id_image_back_url = payload.id_image_back_preview;
+    }
+    if (payload.id_image_back_url && payload.id_image_back_url.startsWith("data:image/")) {
+      payload.id_image_back_url = saveBase64Image(payload.id_image_back_url);
+    }
+    delete payload.id_image_preview;
+    delete payload.id_image_file;
+    delete payload.id_image_back_preview;
+    delete payload.id_image_back_file;
+
+    const reservation = await reservationsService.createReservation(payload, userId);
+    res.status(201).json({ success: true, data: reservation });
+  } catch (error) {
+    console.error("Error creating reservation:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const checkIn = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const updated = await reservationsService.checkInReservation(req.params.id, userId);
+    res.json({ success: true, data: updated, message: "Guest checked in successfully" });
+  } catch (error) {
+    console.error("Error checking in:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const checkOut = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const { payment_amount, payment_method, notes } = req.body;
+    const updated = await reservationsService.checkOutReservation(
+      req.params.id,
+      { payment_amount, payment_method, notes },
+      userId
+    );
+    res.json({ success: true, data: updated, message: "Guest checked out successfully" });
+  } catch (error) {
+    console.error("Error checking out:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const addPayment = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const { amount, payment_method, payment_type, transaction_reference, notes } = req.body;
+    const updated = await reservationsService.addPayment(
+      req.params.id,
+      { amount, payment_method, payment_type, transaction_reference, notes },
+      userId
+    );
+    res.json({ success: true, data: updated, message: "Payment added successfully" });
+  } catch (error) {
+    console.error("Error adding payment:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const cancelReservation = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const { reason } = req.body;
+    const updated = await reservationsService.cancelReservation(req.params.id, reason, userId);
+    res.json({ success: true, data: updated, message: "Reservation cancelled" });
+  } catch (error) {
+    console.error("Error cancelling reservation:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const updateReservation = async (req, res) => {
+  try {
+    const userId = req.user?.id || null;
+    const payload = { ...req.body };
+    if (!payload.id_image_url && payload.id_image_preview) {
+      payload.id_image_url = payload.id_image_preview;
+    }
+    if (payload.id_image_url && payload.id_image_url.startsWith("data:image/")) {
+      payload.id_image_url = saveBase64Image(payload.id_image_url);
+    }
+    if (!payload.id_image_back_url && payload.id_image_back_preview) {
+      payload.id_image_back_url = payload.id_image_back_preview;
+    }
+    if (payload.id_image_back_url && payload.id_image_back_url.startsWith("data:image/")) {
+      payload.id_image_back_url = saveBase64Image(payload.id_image_back_url);
+    }
+    delete payload.id_image_preview;
+    delete payload.id_image_file;
+    delete payload.id_image_back_preview;
+    delete payload.id_image_back_file;
+
+    const updated = await reservationsService.updateReservation(req.params.id, payload, userId);
+    res.json({ success: true, data: updated, message: "Reservation updated successfully" });
+  } catch (error) {
+    console.error("Error updating reservation:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const uploadGuestIdImage = async (req, res) => {
+  try {
+    let frontImageUrl = null;
+    let backImageUrl = null;
+
+    if (req.files && Array.isArray(req.files)) {
+      for (const file of req.files) {
+        if (file.fieldname === "id_image_back") {
+          backImageUrl = `/uploads/guest-ids/${file.filename}`;
+        } else if (file.fieldname === "id_image_front" || file.fieldname === "id_image") {
+          frontImageUrl = `/uploads/guest-ids/${file.filename}`;
+        }
+      }
+    } else if (req.file) {
+      if (req.body.side === "back" || req.query.side === "back") {
+        backImageUrl = `/uploads/guest-ids/${req.file.filename}`;
+      } else {
+        frontImageUrl = `/uploads/guest-ids/${req.file.filename}`;
+      }
+    }
+
+    if (req.body.id_image_front || req.body.id_image_url || req.body.id_image_preview) {
+      const fData = req.body.id_image_front || req.body.id_image_url || req.body.id_image_preview;
+      frontImageUrl = saveBase64Image(fData);
+    }
+    if (req.body.id_image_back || req.body.id_image_back_url || req.body.id_image_back_preview) {
+      const bData = req.body.id_image_back || req.body.id_image_back_url || req.body.id_image_back_preview;
+      backImageUrl = saveBase64Image(bData);
+    }
+
+    if (!frontImageUrl && !backImageUrl) {
+      return res.status(400).json({ success: false, message: "No image file or data provided." });
+    }
+
+    let updated = null;
+    try {
+      updated = await reservationsService.updateGuestIdImage(
+        req.params.id,
+        frontImageUrl || undefined,
+        backImageUrl || undefined
+      );
+    } catch (dbErr) {
+      console.warn("Could not save to reservation row, returning file URLs anyway:", dbErr.message);
+    }
+
+    res.json({
+      success: true,
+      data: updated,
+      imageUrl: frontImageUrl || updated?.id_image_url,
+      backImageUrl: backImageUrl || updated?.id_image_back_url,
+      message: "Guest ID image(s) uploaded successfully"
+    });
+  } catch (error) {
+    console.error("Error uploading guest ID image:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const uploadStandaloneGuestId = async (req, res) => {
+  try {
+    let frontImageUrl = null;
+    let backImageUrl = null;
+
+    if (req.files && Array.isArray(req.files)) {
+      for (const file of req.files) {
+        if (file.fieldname === "id_image_back") {
+          backImageUrl = `/uploads/guest-ids/${file.filename}`;
+        } else if (file.fieldname === "id_image_front" || file.fieldname === "id_image") {
+          frontImageUrl = `/uploads/guest-ids/${file.filename}`;
+        }
+      }
+    } else if (req.file) {
+      if (req.body.side === "back" || req.query.side === "back") {
+        backImageUrl = `/uploads/guest-ids/${req.file.filename}`;
+      } else {
+        frontImageUrl = `/uploads/guest-ids/${req.file.filename}`;
+      }
+    }
+
+    if (req.body.id_image_front || req.body.id_image_url || req.body.id_image_preview) {
+      const fData = req.body.id_image_front || req.body.id_image_url || req.body.id_image_preview;
+      frontImageUrl = saveBase64Image(fData);
+    }
+    if (req.body.id_image_back || req.body.id_image_back_url || req.body.id_image_back_preview) {
+      const bData = req.body.id_image_back || req.body.id_image_back_url || req.body.id_image_back_preview;
+      backImageUrl = saveBase64Image(bData);
+    }
+
+    if (!frontImageUrl && !backImageUrl) {
+      return res.status(400).json({ success: false, message: "No image file or data provided." });
+    }
+
+    res.json({
+      success: true,
+      imageUrl: frontImageUrl,
+      frontImageUrl,
+      backImageUrl,
+      message: "Guest ID image(s) uploaded successfully"
+    });
+  } catch (error) {
+    console.error("Error uploading guest ID image:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const getReports = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const reports = await reservationsService.getReservationReports({ startDate, endDate });
+    res.json({ success: true, data: reports });
+  } catch (error) {
+    console.error("Error generating reservation reports:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+const amendPrice = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rate_per_night, reason } = req.body;
+    const updated = await reservationsService.amendReservationPrice(
+      id,
+      { rate_per_night, reason },
+      req.user?.id
+    );
+    res.json({
+      success: true,
+      message: "Room price amended successfully and notification dispatched to Admin & Finance.",
+      data: updated,
+    });
+  } catch (error) {
+    console.error("Error amending room price:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+
+module.exports = {
+  getReservations,
+  getReservation,
+  createReservation,
+  updateReservation,
+  amendPrice,
+  uploadGuestIdImage,
+  uploadStandaloneGuestId,
+  checkIn,
+  checkOut,
+  addPayment,
+  cancelReservation,
+  getReports,
+};

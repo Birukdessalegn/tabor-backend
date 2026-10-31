@@ -1,29 +1,49 @@
-const express = require('express');
+﻿const express = require("express");
 const router = express.Router();
-const ctrl = require('./room-reservations.controller');
-const { authMiddleware } = require('../../middleware/auth');
+const authenticate = require("../../middleware/auth").authenticate;
+const authorize = require("../../middleware/auth").authorize;
+const { uploadIdImage, uploadIdImages } = require("../../middleware/upload.middleware");
+const {
+  getReservations,
+  getReservation,
+  createReservation,
+  updateReservation,
+  amendPrice,
+  uploadGuestIdImage,
+  uploadStandaloneGuestId,
+  checkIn,
+  checkOut,
+  addPayment,
+  cancelReservation,
+  getReports,
+} = require("./room-reservations.controller");
 
-// All routes require authentication
-router.use(authMiddleware);
+router.use(authenticate);
+router.use(
+  authorize(
+    "admin",
+    "hotel_manager",
+    "manager",
+    "cooperative_manager",
+    "accountant_manager",
+    "finance",
+    "accountant",
+    "receptionist"
+  )
+);
 
-// Dashboard stats
-router.get('/stats', ctrl.getDashboardStats);
-
-// Rooms
-router.get('/rooms', ctrl.getRooms);
-router.get('/rooms/available', ctrl.getAvailableRooms);
-router.get('/room-types', ctrl.getRoomTypes);
-
-// Customers
-router.get('/customers', ctrl.getCustomers);
-
-// Reservations
-router.get('/', ctrl.getReservations);
-router.post('/', ctrl.createReservation);
-router.get('/:id', ctrl.getReservationById);
-router.patch('/:id/status', ctrl.updateReservationStatus);
-router.patch('/:id/amend-price', ctrl.amendReservationPrice);
-router.post('/:id/payments', ctrl.recordPayment);
+router.get("/", getReservations);
+router.get("/reports/summary", getReports);
+router.get("/:id", getReservation);
+router.post("/upload-id", uploadIdImages, uploadStandaloneGuestId);
+router.post("/", createReservation);
+router.put("/:id", updateReservation);
+router.patch("/:id/amend-price", amendPrice);
+router.post("/:id/upload-id", uploadIdImages, uploadGuestIdImage);
+router.post("/:id/check-in", checkIn);
+router.post("/:id/check-out", checkOut);
+router.post("/:id/payments", addPayment);
+router.post("/:id/cancel", cancelReservation);
 
 module.exports = router;
 

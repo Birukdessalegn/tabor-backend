@@ -1,449 +1,950 @@
-const pool = require('../../database/pool');
+﻿const { createNotification } = require("../notifications/notifications.service");
+const pool = require("../../database/pool");
 
-// Generate unique reservation code
-function generateReservationCode() {
-  const prefix = 'TAB';
+let backUrlColumnEnsured = false;
+const ensureBackUrlColumn = async (client = pool) => {
+  if (backUrlColumnEnsured) return;
+  try {
+    await client.query(`
+      ALTER TABLE room_reservations 
+      ADD COLUMN IF NOT EXISTS id_image_back_url TEXT;
+    `);
+    backUrlColumnEnsured = true;
+  } catch (err) {
+    console.warn("âš ï¸ Auto-ensure id_image_back_url note:", err.message);
+  }
+};
+
+/**
+ * Generate a unique reservation code: e.g. KAS-2026-X8F2
+ */
+const generateReservationCode = async () => {
   const year = new Date().getFullYear();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `${prefix}-${year}-${random}`;
-}
+  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const code = `KAS-${year}-${randomSuffix}`;
+  
+  // Verify uniqueness
+  const res = await pool.query("SELECT id FROM room_reservations WHERE reservation_code = $1", [code]);
+  if (res.rows.length > 0) {
+    return generateReservationCode();
+  }
+  return code;
+};
 
-// Get all rooms with type info and availability
-async function getRooms(filters = {}) {
+/**
+ * Calculate difference in days between two YYYY-MM-DD strings
+ */
+const calculateNights = (checkIn, checkOut) => {
+  const d1 = new Date(checkIn);
+  const d2 = new Date(checkOut);
+  const diffTime = d2.getTime() - d1.getTime();
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays > 0 ? diffDays : 1;
+};
+
+/**
+ * Check if a room is available for given dates
+ */
+const isRoomAvailable = async (roomId, checkIn, checkOut, excludeReservationId = null) => {
   let query = `
-    SELECT
-      r.id,
-      r.room_number,
-      r.floor,
-      r.status,
-      r.description,
-      rt.id AS room_type_id,
-      rt.name AS room_type_name,
-      rt.base_rate,
-      rt.max_occupancy,
-      rt.amenities
-    FROM rooms r
-    LEFT JOIN room_types rt ON r.room_type_id = rt.id
-  `;
-  const params = [];
-  const conditions = [];
-
-  if (filters.status) {
-    params.push(filters.status);
-    conditions.push(`r.status = $${params.length}`);
-  }
-
-  if (conditions.length > 0) {
-    query += ' WHERE ' + conditions.join(' AND ');
-  }
-
-  query += ' ORDER BY r.floor, r.room_number';
-  const result = await pool.query(query, params);
-  return result.rows;
-}
-
-// Get available rooms for a date range
-async function getAvailableRooms(checkIn, checkOut) {
-  const result = await pool.query(`
-    SELECT
-      r.id,
-      r.room_number,
-      r.floor,
-      r.status,
-      rt.id AS room_type_id,
-      rt.name AS room_type_name,
-      rt.base_rate,
-      rt.max_occupancy,
-      rt.amenities
-    FROM rooms r
-    LEFT JOIN room_types rt ON r.room_type_id = rt.id
-    WHERE r.status = 'available'
-      AND r.id NOT IN (
-        SELECT room_id FROM room_reservations
-        WHERE status NOT IN ('cancelled', 'checked_out', 'no_show')
-          AND check_in_date < $2
-          AND check_out_date > $1
+    SELECT id, reservation_code, guest_name, check_in_date, check_out_date, status
+    FROM room_reservations
+    WHERE room_id = $1
+      AND status IN ('confirmed', 'checked_in')
+      AND (
+        (check_in_date <= $2 AND check_out_date > $2)
+        OR (check_in_date < $3 AND check_out_date >= $3)
+        OR (check_in_date >= $2 AND check_out_date <= $3)
       )
-    ORDER BY r.floor, r.room_number
-  `, [checkIn, checkOut]);
-  return result.rows;
-}
-
-// Get room types
-async function getRoomTypes() {
-  const result = await pool.query(
-    'SELECT * FROM room_types ORDER BY base_rate'
-  );
-  return result.rows;
-}
-
-// Get all reservations with full details
-async function getReservations(filters = {}) {
-  let query = `
-    SELECT
-      rr.id,
-      rr.reservation_code,
-      rr.check_in_date,
-      rr.check_out_date,
-      rr.actual_check_in,
-      rr.actual_check_out,
-      rr.nights,
-      rr.rate_per_night,
-      rr.original_rate_per_night,
-      rr.total_amount,
-      rr.amended_total,
-      rr.amendment_reason,
-      rr.amended_at,
-      rr.status,
-      rr.payment_status,
-      rr.special_requests,
-      rr.notes,
-      rr.created_at,
-      r.room_number,
-      r.floor,
-      rt.name AS room_type_name,
-      rt.base_rate,
-      c.id AS customer_id,
-      c.full_name AS customer_name,
-      c.phone AS customer_phone,
-      c.email AS customer_email,
-      c.id_type,
-      c.id_number,
-      c.nationality,
-      u.full_name AS created_by_name,
-      au.full_name AS amended_by_name,
-      COALESCE(SUM(rp.amount), 0) AS total_paid
-    FROM room_reservations rr
-    LEFT JOIN rooms r ON rr.room_id = r.id
-    LEFT JOIN room_types rt ON r.room_type_id = rt.id
-    LEFT JOIN customers c ON rr.customer_id = c.id
-    LEFT JOIN users u ON rr.created_by = u.id
-    LEFT JOIN users au ON rr.amended_by = au.id
-    LEFT JOIN room_payments rp ON rp.reservation_id = rr.id
   `;
-
-  const params = [];
-  const conditions = [];
-
-  if (filters.status) {
-    params.push(filters.status);
-    conditions.push(`rr.status = $${params.length}`);
-  }
-  if (filters.date) {
-    params.push(filters.date);
-    conditions.push(`(rr.check_in_date = $${params.length} OR rr.check_out_date = $${params.length})`);
-  }
-  if (filters.search) {
-    params.push(`%${filters.search}%`);
-    conditions.push(`(c.full_name ILIKE $${params.length} OR rr.reservation_code ILIKE $${params.length} OR r.room_number ILIKE $${params.length})`);
+  const params = [roomId, checkIn, checkOut];
+  if (excludeReservationId) {
+    query += ` AND id != $4`;
+    params.push(excludeReservationId);
   }
 
-  if (conditions.length > 0) {
-    query += ' WHERE ' + conditions.join(' AND ');
-  }
+  const { rows } = await pool.query(query, params);
+  return rows.length === 0;
+};
 
-  query += ' GROUP BY rr.id, r.room_number, r.floor, rt.name, rt.base_rate, c.id, c.full_name, c.phone, c.email, c.id_type, c.id_number, c.nationality, u.full_name, au.full_name';
-  query += ' ORDER BY rr.created_at DESC';
-
-  const result = await pool.query(query, params);
-  return result.rows;
-}
-
-// Get single reservation
-async function getReservationById(id) {
-  const result = await pool.query(`
-    SELECT
+/**
+ * Get all room reservations with filters
+ */
+const getAllReservations = async ({ status, search, startDate, endDate, roomId, limit = 100, offset = 0 } = {}) => {
+  let query = `
+    SELECT 
       rr.*,
       r.room_number,
       r.floor,
       rt.name AS room_type_name,
-      rt.base_rate,
-      c.full_name AS customer_name,
-      c.phone AS customer_phone,
-      c.email AS customer_email,
-      c.id_type,
-      c.id_number,
-      c.nationality,
-      u.full_name AS created_by_name,
-      COALESCE(
-        json_agg(
-          json_build_object(
-            'id', rp.id,
-            'amount', rp.amount,
-            'payment_method', rp.payment_method,
-            'payment_date', rp.payment_date,
-            'reference_number', rp.reference_number,
-            'notes', rp.notes
-          )
-        ) FILTER (WHERE rp.id IS NOT NULL),
-        '[]'
-      ) AS payments
+      NULL AS vip_name,
+      NULL AS vip_tier,
+      NULL AS vip_company,
+      u.username AS created_by_username
     FROM room_reservations rr
-    LEFT JOIN rooms r ON rr.room_id = r.id
-    LEFT JOIN room_types rt ON r.room_type_id = rt.id
-    LEFT JOIN customers c ON rr.customer_id = c.id
+    JOIN rooms r ON rr.room_id = r.id
+    JOIN room_types rt ON r.room_type_id = rt.id
+    
     LEFT JOIN users u ON rr.created_by = u.id
-    LEFT JOIN room_payments rp ON rp.reservation_id = rr.id
-    WHERE rr.id = $1
-    GROUP BY rr.id, r.room_number, r.floor, rt.name, rt.base_rate,
-             c.full_name, c.phone, c.email, c.id_type, c.id_number, c.nationality, u.full_name
-  `, [id]);
-  return result.rows[0];
-}
+    WHERE 1=1
+  `;
+  const params = [];
 
-// Create reservation with customer upsert
-async function createReservation(data, userId) {
+  if (status && status !== "all") {
+    params.push(status);
+    query += ` AND rr.status = $${params.length}`;
+  }
+
+  if (roomId) {
+    params.push(roomId);
+    query += ` AND rr.room_id = $${params.length}`;
+  }
+
+  if (startDate) {
+    params.push(startDate);
+    query += ` AND rr.check_out_date >= $${params.length}`;
+  }
+
+  if (endDate) {
+    params.push(endDate);
+    query += ` AND rr.check_in_date <= $${params.length}`;
+  }
+
+  if (search) {
+    params.push(`%${search}%`);
+    query += ` AND (
+      rr.guest_name ILIKE $${params.length}
+      OR rr.guest_phone ILIKE $${params.length}
+      OR rr.reservation_code ILIKE $${params.length}
+      OR rr.guest_id_number ILIKE $${params.length}
+      OR r.room_number ILIKE $${params.length}
+      OR vc.name ILIKE $${params.length}
+      OR vc.company ILIKE $${params.length}
+    )`;
+  }
+
+  query += ` ORDER BY rr.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  params.push(limit, offset);
+
+  const { rows } = await pool.query(query, params);
+  return rows;
+};
+
+/**
+ * Get single reservation by ID including payments
+ */
+const getReservationById = async (id) => {
+  const resQuery = `
+    SELECT 
+      rr.*,
+      r.room_number,
+      r.floor,
+      rt.name AS room_type_name,
+      rt.amenities,
+      NULL AS vip_name,
+      NULL AS vip_tier,
+      NULL AS vip_company,
+      u.username AS created_by_username
+    FROM room_reservations rr
+    JOIN rooms r ON rr.room_id = r.id
+    JOIN room_types rt ON r.room_type_id = rt.id
+    
+    LEFT JOIN users u ON rr.created_by = u.id
+    WHERE rr.id = $1
+  `;
+  const { rows: resRows } = await pool.query(resQuery, [id]);
+  if (resRows.length === 0) return null;
+
+  const reservation = resRows[0];
+
+  const payQuery = `
+    SELECT 
+      rp.*,
+      u.username AS received_by_username
+    FROM room_payments rp
+    LEFT JOIN users u ON rp.received_by = u.id
+    WHERE rp.reservation_id = $1
+    ORDER BY rp.created_at ASC
+  `;
+  const { rows: payments } = await pool.query(payQuery, [id]);
+  reservation.payments = payments;
+
+  return reservation;
+};
+
+/**
+ * Create a new reservation or walk-in check-in
+ */
+const createReservation = async (data, userId) => {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
-    // Upsert customer
-    let customerId = data.customer_id;
-    if (!customerId) {
-      const existing = await client.query(
-        'SELECT id FROM customers WHERE phone = $1 OR (full_name = $2 AND phone = $3) LIMIT 1',
-        [data.customer_phone, data.customer_name, data.customer_phone]
-      );
-      if (existing.rows.length > 0) {
-        customerId = existing.rows[0].id;
+    const {
+      guest_name,
+      guest_phone,
+      guest_email,
+      guest_id_number,
+      id_image_url,
+      id_image_back_url,
+      vip_customer_id,
+      room_id,
+      check_in_date,
+      check_out_date,
+      adults = 1,
+      children = 0,
+      rate_per_night,
+      initial_payment = 0,
+      payment_method = "cash",
+      transaction_reference,
+      special_requests,
+      is_walkin = false
+    } = data;
+
+    if (!guest_name || !room_id || !check_in_date || !check_out_date) {
+      throw new Error("Guest name, room, check-in date, and check-out date are required.");
+    }
+
+    // Validate room existence and fetch room type base rate if not provided
+    const roomRes = await client.query(
+      `SELECT r.*, rt.base_rate FROM rooms r JOIN room_types rt ON r.room_type_id = rt.id WHERE r.id = $1`,
+      [room_id]
+    );
+    if (roomRes.rows.length === 0) {
+      throw new Error("Selected room does not exist.");
+    }
+    const room = roomRes.rows[0];
+
+    // Check date availability
+    const available = await isRoomAvailable(room_id, check_in_date, check_out_date);
+    if (!available) {
+      throw new Error(`Room ${room.room_number} is already booked or occupied for the selected dates.`);
+    }
+
+    if (is_walkin && (room.status === "occupied" || room.status === "maintenance")) {
+      throw new Error(`Room ${room.room_number} is currently ${room.status} and cannot be checked into.`);
+    }
+
+    const pricePerNight = rate_per_night !== undefined && rate_per_night !== null 
+      ? Number(rate_per_night) 
+      : Number(room.base_rate);
+    const nights = calculateNights(check_in_date, check_out_date);
+    const totalAmount = pricePerNight * nights;
+    const paidAmount = Number(initial_payment) || 0;
+
+    let paymentStatus = "unpaid";
+    if (paidAmount >= totalAmount && totalAmount > 0) {
+      paymentStatus = "paid";
+    } else if (paidAmount > 0) {
+      paymentStatus = "partial";
+    }
+
+    const status = is_walkin ? "checked_in" : "confirmed";
+    const actualCheckIn = is_walkin ? new Date() : null;
+
+    const resCode = await generateReservationCode();
+
+    await ensureBackUrlColumn(client);
+
+    const insertParams = [
+      resCode,
+      guest_name.trim(),
+      guest_phone || null,
+      guest_email || null,
+      guest_id_number || null,
+      id_image_url || null,
+      id_image_back_url || null,
+      vip_customer_id || null,
+      room_id,
+      check_in_date,
+      check_out_date,
+      actualCheckIn,
+      adults,
+      children,
+      pricePerNight,
+      nights,
+      totalAmount,
+      paidAmount,
+      paymentStatus,
+      status,
+      special_requests || null,
+      userId || null
+    ];
+
+    let reservation;
+    try {
+      const insertResQuery = `
+        INSERT INTO room_reservations (
+          reservation_code, guest_name, guest_phone, guest_email, guest_id_number,
+          id_image_url, id_image_back_url, vip_customer_id, room_id, check_in_date, check_out_date, actual_check_in_at,
+          adults, children, rate_per_night, total_nights, total_amount, paid_amount,
+          payment_status, status, special_requests, created_by
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+        RETURNING *
+      `;
+      const { rows: resRows } = await client.query(insertResQuery, insertParams);
+      reservation = resRows[0];
+    } catch (insertErr) {
+      if (insertErr.message && insertErr.message.includes("id_image_back_url")) {
+        try {
+          await client.query("ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_back_url TEXT;");
+          backUrlColumnEnsured = true;
+          const { rows: retryRows } = await client.query(
+            `INSERT INTO room_reservations (
+              reservation_code, guest_name, guest_phone, guest_email, guest_id_number,
+              id_image_url, id_image_back_url, vip_customer_id, room_id, check_in_date, check_out_date, actual_check_in_at,
+              adults, children, rate_per_night, total_nights, total_amount, paid_amount,
+              payment_status, status, special_requests, created_by
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+            RETURNING *`,
+            insertParams
+          );
+          reservation = retryRows[0];
+        } catch (retryErr) {
+          console.warn("Retrying createReservation without id_image_back_url:", retryErr.message);
+          const fallbackParams = [
+            resCode,
+            guest_name.trim(),
+            guest_phone || null,
+            guest_email || null,
+            guest_id_number || null,
+            id_image_url || null,
+            vip_customer_id || null,
+            room_id,
+            check_in_date,
+            check_out_date,
+            actualCheckIn,
+            adults,
+            children,
+            pricePerNight,
+            nights,
+            totalAmount,
+            paidAmount,
+            paymentStatus,
+            status,
+            special_requests || null,
+            userId || null
+          ];
+          const { rows: fallbackRows } = await client.query(
+            `INSERT INTO room_reservations (
+              reservation_code, guest_name, guest_phone, guest_email, guest_id_number,
+              id_image_url, vip_customer_id, room_id, check_in_date, check_out_date, actual_check_in_at,
+              adults, children, rate_per_night, total_nights, total_amount, paid_amount,
+              payment_status, status, special_requests, created_by
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            RETURNING *`,
+            fallbackParams
+          );
+          reservation = fallbackRows[0];
+        }
       } else {
-        const newCustomer = await client.query(
-          `INSERT INTO customers (full_name, phone, email, id_type, id_number, nationality)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-          [data.customer_name, data.customer_phone, data.customer_email || null,
-           data.id_type || null, data.id_number || null, data.nationality || null]
-        );
-        customerId = newCustomer.rows[0].id;
+        throw insertErr;
       }
     }
 
-    const checkIn = new Date(data.check_in_date);
-    const checkOut = new Date(data.check_out_date);
-    const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
-    const ratePerNight = parseFloat(data.rate_per_night);
-    const totalAmount = nights * ratePerNight;
-    const reservationCode = generateReservationCode();
-
-    const result = await client.query(`
-      INSERT INTO room_reservations (
-        reservation_code, room_id, customer_id, check_in_date, check_out_date,
-        nights, rate_per_night, original_rate_per_night, total_amount,
-        status, payment_status, special_requests, notes, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING id
-    `, [
-      reservationCode, data.room_id, customerId,
-      data.check_in_date, data.check_out_date,
-      nights, ratePerNight, totalAmount,
-      data.status || 'confirmed', data.payment_status || 'unpaid',
-      data.special_requests || null, data.notes || null, userId
-    ]);
-
-    const reservationId = result.rows[0].id;
-
-    // Update room status to reserved
-    await client.query(
-      `UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = $1`,
-      [data.room_id]
-    );
-
-    await client.query('COMMIT');
-    return { reservation_id: reservationId, reservation_code: reservationCode };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-// Update reservation status (check-in, check-out, cancel)
-async function updateReservationStatus(id, status, userId) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const res = await client.query('SELECT * FROM room_reservations WHERE id = $1', [id]);
-    if (!res.rows.length) throw new Error('Reservation not found');
-    const reservation = res.rows[0];
-
-    const updates = { status };
-    let setClause = 'status = $1, updated_at = NOW()';
-    const params = [status];
-
-    if (status === 'checked_in') {
-      setClause += ', actual_check_in = NOW()';
-    } else if (status === 'checked_out') {
-      setClause += ', actual_check_out = NOW()';
+    // If initial payment was made, record it
+    if (paidAmount > 0) {
+      await client.query(
+        `INSERT INTO room_payments (
+          reservation_id, amount, payment_method, payment_type, transaction_reference, received_by, receipt_image, image_url
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          reservation.id,
+          paidAmount,
+          payment_method,
+          is_walkin ? "payment" : "deposit",
+          transaction_reference || null,
+          userId || null,
+          receipt_image || image_url || null,
+          receipt_image || image_url || null
+        ]
+      );
     }
 
-    params.push(id);
-    await client.query(
-      `UPDATE room_reservations SET ${setClause} WHERE id = $${params.length}`,
-      params
-    );
+    // Update room status
+    if (is_walkin) {
+      await client.query("UPDATE rooms SET status = 'occupied', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [room_id]);
+    } else {
+      // If check-in is today, mark room as reserved
+      const todayStr = new Date().toISOString().split("T")[0];
+      if (check_in_date === todayStr && room.status === "available") {
+        await client.query("UPDATE rooms SET status = 'reserved', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [room_id]);
+      }
+    }
 
-    // Update room status accordingly
-    let roomStatus = 'reserved';
-    if (status === 'checked_in') roomStatus = 'occupied';
-    if (status === 'checked_out' || status === 'cancelled' || status === 'no_show') roomStatus = 'available';
-
-    await client.query(
-      `UPDATE rooms SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [roomStatus, reservation.room_id]
-    );
-
-    await client.query('COMMIT');
-    return { success: true };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
+    await client.query("COMMIT");
+    return reservation;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
   } finally {
     client.release();
   }
-}
+};
 
-// Amend reservation price
-async function amendReservationPrice(id, newRatePerNight, reason, userId) {
-  const res = await pool.query(`
-    SELECT rr.*, r.room_number, rt.name AS room_type_name
-    FROM room_reservations rr
-    JOIN rooms r ON rr.room_id = r.id
-    LEFT JOIN room_types rt ON r.room_type_id = rt.id
-    WHERE rr.id = $1
-  `, [id]);
-
-  if (!res.rows.length) throw new Error('Reservation not found');
-  const reservation = res.rows[0];
-  const nights = reservation.nights;
-  const newTotal = parseFloat(newRatePerNight) * nights;
-
-  await pool.query(`
-    UPDATE room_reservations SET
-      rate_per_night = $1,
-      amended_total = $2,
-      amendment_reason = $3,
-      amended_by = $4,
-      amended_at = NOW(),
-      updated_at = NOW()
-    WHERE id = $5
-  `, [newRatePerNight, newTotal, reason, userId, id]);
-
-  return {
-    original_rate: reservation.original_rate_per_night || reservation.rate_per_night,
-    new_rate: newRatePerNight,
-    nights,
-    new_total: newTotal,
-  };
-}
-
-// Record a payment for a reservation
-async function recordPayment(reservationId, paymentData, userId) {
+/**
+ * Check-in an existing reservation
+ */
+const checkInReservation = async (id, userId) => {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
-    await client.query(`
-      INSERT INTO room_payments (reservation_id, amount, payment_method, reference_number, notes, received_by)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [
-      reservationId,
-      paymentData.amount,
-      paymentData.payment_method,
-      paymentData.reference_number || null,
-      paymentData.notes || null,
-      userId
-    ]);
+    const resResult = await client.query("SELECT * FROM room_reservations WHERE id = $1", [id]);
+    if (resResult.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    const reservation = resResult.rows[0];
+    if (reservation.status !== "confirmed") {
+      throw new Error(`Cannot check in reservation with status '${reservation.status}'.`);
+    }
 
-    // Recalculate payment status
-    const totals = await client.query(`
-      SELECT rr.amended_total, rr.total_amount, COALESCE(SUM(rp.amount), 0) AS paid
-      FROM room_reservations rr
-      LEFT JOIN room_payments rp ON rp.reservation_id = rr.id
-      WHERE rr.id = $1
-      GROUP BY rr.id, rr.amended_total, rr.total_amount
-    `, [reservationId]);
-
-    const row = totals.rows[0];
-    const totalDue = row.amended_total || row.total_amount;
-    const paid = parseFloat(row.paid);
-    let paymentStatus = 'unpaid';
-    if (paid >= totalDue) paymentStatus = 'paid';
-    else if (paid > 0) paymentStatus = 'partial';
-
-    await client.query(
-      'UPDATE room_reservations SET payment_status = $1, updated_at = NOW() WHERE id = $2',
-      [paymentStatus, reservationId]
+    // Update reservation
+    const updatedRes = await client.query(
+      `UPDATE room_reservations 
+       SET status = 'checked_in', actual_check_in_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING *`,
+      [id]
     );
 
-    await client.query('COMMIT');
-    return { success: true, payment_status: paymentStatus };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
+    // Update room to occupied
+    await client.query(
+      "UPDATE rooms SET status = 'occupied', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+      [reservation.room_id]
+    );
+
+    await client.query("COMMIT");
+    return updatedRes.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
   } finally {
     client.release();
   }
-}
+};
 
-// Get customers
-async function getCustomers(search) {
-  let query = 'SELECT * FROM customers';
-  const params = [];
-  if (search) {
-    params.push(`%${search}%`);
-    query += ` WHERE full_name ILIKE $1 OR phone ILIKE $1 OR id_number ILIKE $1`;
+/**
+ * Add a payment to a reservation
+ */
+const addPayment = async (id, { amount, payment_method, payment_type = "payment", transaction_reference, notes, receipt_image, image_url }, userId) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const resResult = await client.query("SELECT * FROM room_reservations WHERE id = $1", [id]);
+    if (resResult.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    const reservation = resResult.rows[0];
+
+    const payAmount = Number(amount);
+    if (isNaN(payAmount) || payAmount <= 0) {
+      throw new Error("Payment amount must be greater than 0.");
+    }
+
+    await client.query(
+      `INSERT INTO room_payments (
+        reservation_id, amount, payment_method, payment_type, transaction_reference, notes, received_by, receipt_image, image_url
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        id,
+        payAmount,
+        payment_method,
+        payment_type,
+        transaction_reference || null,
+        notes || null,
+        userId || null,
+        receipt_image || image_url || null,
+        receipt_image || image_url || null
+      ]
+    );
+
+    const newPaidAmount = Number(reservation.paid_amount) + payAmount;
+    let paymentStatus = "partial";
+    if (newPaidAmount >= Number(reservation.total_amount)) {
+      paymentStatus = "paid";
+    }
+
+    const updatedRes = await client.query(
+      `UPDATE room_reservations
+       SET paid_amount = $1, payment_status = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3 RETURNING *`,
+      [newPaidAmount, paymentStatus, id]
+    );
+
+    await client.query("COMMIT");
+    return updatedRes.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-  query += ' ORDER BY full_name LIMIT 50';
-  const result = await pool.query(query, params);
-  return result.rows;
-}
+};
 
-// Dashboard stats
-async function getDashboardStats() {
-  const [rooms, reservations, todayCheckIns, todayCheckOuts, revenue] = await Promise.all([
-    pool.query('SELECT status, COUNT(*) AS count FROM rooms GROUP BY status'),
-    pool.query('SELECT status, COUNT(*) AS count FROM room_reservations GROUP BY status'),
-    pool.query(`
-      SELECT COUNT(*) AS count FROM room_reservations
-      WHERE check_in_date = CURRENT_DATE AND status IN ('confirmed', 'checked_in')
-    `),
-    pool.query(`
-      SELECT COUNT(*) AS count FROM room_reservations
-      WHERE check_out_date = CURRENT_DATE AND status = 'checked_in'
-    `),
-    pool.query(`
-      SELECT COALESCE(SUM(amount), 0) AS total FROM room_payments
-      WHERE DATE(payment_date) = CURRENT_DATE
-    `),
-  ]);
+/**
+ * Check-out a reservation (process final payment if any, set room to cleaning)
+ */
+const checkOutReservation = async (id, { payment_amount = 0, payment_method = "cash", notes }, userId) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-  const roomStats = {};
-  rooms.rows.forEach(r => { roomStats[r.status] = parseInt(r.count); });
+    const resResult = await client.query("SELECT * FROM room_reservations WHERE id = $1", [id]);
+    if (resResult.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    const reservation = resResult.rows[0];
+    if (reservation.status !== "checked_in") {
+      throw new Error(`Cannot check out reservation with status '${reservation.status}'.`);
+    }
 
-  const resStats = {};
-  reservations.rows.forEach(r => { resStats[r.status] = parseInt(r.count); });
+    let currentPaid = Number(reservation.paid_amount);
+    const finalPayment = Number(payment_amount) || 0;
+
+    if (finalPayment > 0) {
+      await client.query(
+        `INSERT INTO room_payments (
+          reservation_id, amount, payment_method, payment_type, transaction_reference, notes, received_by, receipt_image, image_url
+        ) VALUES ($1, $2, $3, 'settlement', $4, $5, $6, $7, $8)`,
+        [id, finalPayment, payment_method, transaction_reference || null, notes || "Checkout settlement", userId || null, receipt_image || image_url || null, receipt_image || image_url || null]
+      );
+      currentPaid += finalPayment;
+    }
+
+    let paymentStatus = currentPaid >= Number(reservation.total_amount) ? "paid" : "partial";
+
+    // Mark reservation as checked_out
+    const updatedRes = await client.query(
+      `UPDATE room_reservations 
+       SET status = 'checked_out',
+           actual_check_out_at = CURRENT_TIMESTAMP,
+           paid_amount = $1,
+           payment_status = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING *`,
+      [currentPaid, paymentStatus, id]
+    );
+
+    // Release room and set status to 'cleaning'
+    await client.query(
+      "UPDATE rooms SET status = 'cleaning', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+      [reservation.room_id]
+    );
+
+    await client.query("COMMIT");
+    return updatedRes.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Cancel a reservation
+ */
+const cancelReservation = async (id, reason, userId) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const resResult = await client.query("SELECT * FROM room_reservations WHERE id = $1", [id]);
+    if (resResult.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    const reservation = resResult.rows[0];
+
+    const updatedRes = await client.query(
+      `UPDATE room_reservations 
+       SET status = 'cancelled', notes = CONCAT(COALESCE(notes, ''), ' [Cancelled: ', $1::text, ']'), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2 RETURNING *`,
+      [reason || "Customer cancelled", id]
+    );
+
+    // If room is currently 'reserved' for this reservation, free it up
+    const roomCheck = await client.query("SELECT status FROM rooms WHERE id = $1", [reservation.room_id]);
+    if (roomCheck.rows.length > 0 && roomCheck.rows[0].status === "reserved") {
+      await client.query("UPDATE rooms SET status = 'available', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [reservation.room_id]);
+    }
+
+    await client.query("COMMIT");
+    return updatedRes.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Update reservation details (guest info, special requests, id_image_url, id_image_back_url)
+ */
+const updateReservation = async (id, data, userId) => {
+  await ensureBackUrlColumn();
+  const {
+    guest_name,
+    guest_phone,
+    guest_email,
+    guest_id_number,
+    special_requests,
+    id_image_url,
+    id_image_back_url
+  } = data;
+
+  const executeUpdate = async () => {
+    return await pool.query(
+      `UPDATE room_reservations
+       SET 
+         guest_name = COALESCE($1, guest_name),
+         guest_phone = COALESCE($2, guest_phone),
+         guest_email = COALESCE($3, guest_email),
+         guest_id_number = COALESCE($4, guest_id_number),
+         special_requests = COALESCE($5, special_requests),
+         id_image_url = COALESCE($6, id_image_url),
+         id_image_back_url = COALESCE($7, id_image_back_url),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = $8
+       RETURNING *`,
+      [
+        guest_name !== undefined ? guest_name.trim() : null,
+        guest_phone !== undefined ? guest_phone : null,
+        guest_email !== undefined ? guest_email : null,
+        guest_id_number !== undefined ? guest_id_number : null,
+        special_requests !== undefined ? special_requests : null,
+        id_image_url !== undefined ? id_image_url : null,
+        id_image_back_url !== undefined ? id_image_back_url : null,
+        id
+      ]
+    );
+  };
+
+  try {
+    const res = await executeUpdate();
+    if (res.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    return res.rows[0];
+  } catch (err) {
+    if (err.message && err.message.includes("id_image_back_url")) {
+      try {
+        await pool.query("ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_back_url TEXT;");
+        backUrlColumnEnsured = true;
+        const retryRes = await executeUpdate();
+        if (retryRes.rows.length === 0) throw new Error("Reservation not found.");
+        return retryRes.rows[0];
+      } catch (retryErr) {
+        console.warn("Falling back to update without id_image_back_url:", retryErr.message);
+        const fallbackRes = await pool.query(
+          `UPDATE room_reservations
+           SET 
+             guest_name = COALESCE($1, guest_name),
+             guest_phone = COALESCE($2, guest_phone),
+             guest_email = COALESCE($3, guest_email),
+             guest_id_number = COALESCE($4, guest_id_number),
+             special_requests = COALESCE($5, special_requests),
+             id_image_url = COALESCE($6, id_image_url),
+             updated_at = CURRENT_TIMESTAMP
+           WHERE id = $7
+           RETURNING *`,
+          [
+            guest_name !== undefined ? guest_name.trim() : null,
+            guest_phone !== undefined ? guest_phone : null,
+            guest_email !== undefined ? guest_email : null,
+            guest_id_number !== undefined ? guest_id_number : null,
+            special_requests !== undefined ? special_requests : null,
+            id_image_url !== undefined ? id_image_url : null,
+            id
+          ]
+        );
+        if (fallbackRes.rows.length === 0) throw new Error("Reservation not found.");
+        return fallbackRes.rows[0];
+      }
+    }
+    throw err;
+  }
+};
+
+/**
+ * Update specifically the Guest ID image (front and/or back)
+ */
+const updateGuestIdImage = async (id, imageUrl, backImageUrl = undefined) => {
+  await ensureBackUrlColumn();
+  let query;
+  let params;
+
+  if (backImageUrl !== undefined && imageUrl !== undefined) {
+    query = `UPDATE room_reservations
+             SET id_image_url = $1, id_image_back_url = $2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $3
+             RETURNING *`;
+    params = [imageUrl, backImageUrl, id];
+  } else if (backImageUrl !== undefined) {
+    query = `UPDATE room_reservations
+             SET id_image_back_url = $1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2
+             RETURNING *`;
+    params = [backImageUrl, id];
+  } else {
+    query = `UPDATE room_reservations
+             SET id_image_url = $1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2
+             RETURNING *`;
+    params = [imageUrl, id];
+  }
+
+  try {
+    const res = await pool.query(query, params);
+    if (res.rows.length === 0) {
+      throw new Error("Reservation not found.");
+    }
+    return res.rows[0];
+  } catch (err) {
+    if (err.message && err.message.includes("id_image_back_url")) {
+      try {
+        await pool.query("ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_back_url TEXT;");
+        backUrlColumnEnsured = true;
+        const retryRes = await pool.query(query, params);
+        if (retryRes.rows.length === 0) throw new Error("Reservation not found.");
+        return retryRes.rows[0];
+      } catch (retryErr) {
+        console.warn("Retrying updateGuestIdImage with front image only:", retryErr.message);
+        if (imageUrl !== undefined) {
+          const fallbackRes = await pool.query(
+            "UPDATE room_reservations SET id_image_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *",
+            [imageUrl, id]
+          );
+          if (fallbackRes.rows.length === 0) throw new Error("Reservation not found.");
+          return fallbackRes.rows[0];
+        }
+      }
+    }
+    throw err;
+  }
+};
+
+/**
+ * Front Desk Performance & Revenue Reports
+ */
+const getReservationReports = async ({ startDate, endDate } = {}) => {
+  const whereClauses = [];
+  const params = [];
+
+  if (startDate) {
+    params.push(startDate);
+    whereClauses.push(`rr.check_in_date >= $${params.length}`);
+  }
+  if (endDate) {
+    params.push(endDate);
+    whereClauses.push(`rr.check_out_date <= $${params.length}`);
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+  // 1. Overall Metrics
+  const metricsQuery = `
+    SELECT
+      COUNT(*)::int AS total_reservations,
+      COUNT(CASE WHEN rr.status = 'checked_in' THEN 1 END)::int AS active_stays,
+      COUNT(CASE WHEN rr.status = 'checked_out' THEN 1 END)::int AS completed_stays,
+      COUNT(CASE WHEN rr.status = 'confirmed' THEN 1 END)::int AS upcoming_reservations,
+      COUNT(CASE WHEN rr.status = 'cancelled' THEN 1 END)::int AS cancelled_stays,
+      COALESCE(SUM(CASE WHEN rr.status != 'cancelled' THEN rr.total_amount ELSE 0 END), 0)::numeric(12,2) AS total_revenue,
+      COALESCE(SUM(CASE WHEN rr.status != 'cancelled' THEN rr.paid_amount ELSE 0 END), 0)::numeric(12,2) AS collected_revenue,
+      COALESCE(SUM(CASE WHEN rr.status != 'cancelled' THEN (rr.total_amount - rr.paid_amount) ELSE 0 END), 0)::numeric(12,2) AS pending_revenue,
+      COALESCE(SUM(CASE WHEN rr.status != 'cancelled' THEN rr.total_nights ELSE 0 END), 0)::int AS total_nights_sold,
+      COALESCE(AVG(CASE WHEN rr.status != 'cancelled' THEN rr.rate_per_night END), 0)::numeric(12,2) AS average_daily_rate,
+      COALESCE(AVG(CASE WHEN rr.status != 'cancelled' THEN rr.total_nights END), 0)::numeric(5,1) AS average_stay_duration
+    FROM room_reservations rr
+    ${whereSql}
+  `;
+  const { rows: metricRows } = await pool.query(metricsQuery, params);
+  const metrics = metricRows[0];
+
+  // 2. Room Count for Occupancy Rate Calculation
+  const { rows: roomRows } = await pool.query("SELECT COUNT(*)::int AS count FROM rooms");
+  const totalRooms = roomRows[0].count || 1;
+  const daysInPeriod = startDate && endDate
+    ? Math.max(1, Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)))
+    : 30;
+  const maxRoomNights = totalRooms * daysInPeriod;
+  const occupancyRate = maxRoomNights > 0
+    ? Math.min(100, Math.round(((metrics.total_nights_sold || 0) / maxRoomNights) * 100))
+    : 0;
+  metrics.total_rooms = totalRooms;
+  metrics.occupancy_rate = occupancyRate;
+  metrics.rev_par = (Number(metrics.average_daily_rate || 0) * (occupancyRate / 100)).toFixed(2);
+
+  // 3. Category Breakdown
+  const categoryQuery = `
+    SELECT
+      rt.id AS room_type_id,
+      rt.name AS room_type_name,
+      rt.base_rate,
+      COUNT(rr.id)::int AS total_bookings,
+      COALESCE(SUM(rr.total_nights), 0)::int AS nights_sold,
+      COALESCE(SUM(rr.total_amount), 0)::numeric(12,2) AS total_revenue
+    FROM room_types rt
+    LEFT JOIN rooms r ON rt.id = r.room_type_id
+    LEFT JOIN room_reservations rr ON r.id = rr.room_id AND rr.status != 'cancelled'
+    GROUP BY rt.id, rt.name, rt.base_rate
+    ORDER BY total_revenue DESC
+  `;
+  const { rows: categoryStats } = await pool.query(categoryQuery);
+
+  // 4. Payment Method Breakdown
+  const paymentQuery = `
+    SELECT
+      rp.payment_method,
+      COUNT(rp.id)::int AS transaction_count,
+      COALESCE(SUM(rp.amount), 0)::numeric(12,2) AS total_amount
+    FROM room_payments rp
+    JOIN room_reservations rr ON rp.reservation_id = rr.id
+    ${whereSql}
+    GROUP BY rp.payment_method
+    ORDER BY total_amount DESC
+  `;
+  const { rows: paymentStats } = await pool.query(paymentQuery, params);
 
   return {
-    rooms: roomStats,
-    reservations: resStats,
-    today_check_ins: parseInt(todayCheckIns.rows[0]?.count || 0),
-    today_check_outs: parseInt(todayCheckOuts.rows[0]?.count || 0),
-    today_revenue: parseFloat(revenue.rows[0]?.total || 0),
+    metrics,
+    categoryStats,
+    paymentStats,
+    period: {
+      startDate: startDate || null,
+      endDate: endDate || null
+    }
   };
-}
+};
+
+
+/**
+ * Amend / edit room reservation price (special guest rate)
+ * Recalculates total_amount and immediately notifies Admin and Finance with reason.
+ */
+const amendReservationPrice = async (id, { rate_per_night, reason }, userId) => {
+  if (rate_per_night === undefined || isNaN(Number(rate_per_night)) || Number(rate_per_night) < 0) {
+    throw new Error("Please enter a valid rate per night.");
+  }
+  if (!reason || !reason.trim()) {
+    throw new Error("Reason for price amendment is required.");
+  }
+
+  // Ensure columns exist
+  await pool.query(`
+    ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS original_rate_per_night NUMERIC(12,2);
+    ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amendment_reason TEXT;
+    ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_by UUID;
+    ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_at TIMESTAMP;
+  `);
+
+  // 1. Fetch existing reservation with room number and room type
+  const checkRes = await pool.query(
+    `SELECT rr.*, r.room_number, rt.name AS room_type_name
+     FROM room_reservations rr
+     JOIN rooms r ON rr.room_id = r.id
+     LEFT JOIN room_types rt ON r.room_type_id = rt.id
+     WHERE rr.id = $1`,
+    [id]
+  );
+  if (checkRes.rows.length === 0) {
+    throw new Error("Reservation not found.");
+  }
+  const existing = checkRes.rows[0];
+
+  // 2. Fetch staff member name who is making the amendment
+  let staffName = "Reception Staff";
+  if (userId) {
+    const userRes = await pool.query(`SELECT name, username FROM users WHERE id = $1`, [userId]);
+    if (userRes.rows.length > 0) {
+      staffName = userRes.rows[0].name || userRes.rows[0].username || "Reception Staff";
+    }
+  }
+
+  const oldRate = Number(existing.rate_per_night || 0);
+  const newRate = Number(rate_per_night);
+  const totalNights = Math.max(1, Number(existing.total_nights || 1));
+  const newTotal = Number((newRate * totalNights).toFixed(2));
+  const paidAmount = Number(existing.paid_amount || 0);
+
+  let newPaymentStatus = "unpaid";
+  if (paidAmount >= newTotal && newTotal > 0) {
+    newPaymentStatus = "paid";
+  } else if (paidAmount > 0) {
+    newPaymentStatus = "partial";
+  }
+
+  // 3. Update reservation
+  const updateRes = await pool.query(
+    `UPDATE room_reservations
+     SET 
+       rate_per_night = $1,
+       total_amount = $2,
+       payment_status = $3,
+       original_rate_per_night = COALESCE(original_rate_per_night, $4),
+       price_amendment_reason = $5,
+       price_amended_by = $6,
+       price_amended_at = NOW(),
+       updated_at = NOW()
+     WHERE id = $7
+     RETURNING *`,
+    [
+      newRate,
+      newTotal,
+      newPaymentStatus,
+      oldRate,
+      reason.trim(),
+      userId || null,
+      id
+    ]
+  );
+
+  const updated = updateRes.rows[0];
+
+  // 4. Broadcast automated notification to Admin and Finance
+  const diff = newRate - oldRate;
+  const diffText = diff > 0 ? `+${diff.toLocaleString()} ETB` : `${diff.toLocaleString()} ETB`;
+
+  await createNotification({
+    targetRoles: ["admin", "finance", "accountant_manager", "manager", "hotel_manager"],
+    title: `Room Price Amended - Room #${existing.room_number}`,
+    message: `Room #${existing.room_number} (${existing.guest_name || "Guest"}) rate changed from ${oldRate.toLocaleString()} to ${newRate.toLocaleString()} ETB/night (${diffText}, New Total: ${newTotal.toLocaleString()} ETB) by ${staffName}. Reason: "${reason.trim()}"`,
+    type: "warning",
+    referenceType: "room_price_amendment",
+    referenceId: id,
+  });
+
+  return {
+    ...updated,
+    room_number: existing.room_number,
+    room_type_name: existing.room_type_name,
+    oldRate,
+    newRate,
+    diff,
+    staffName,
+  };
+};
+
 
 module.exports = {
-  getRooms,
-  getAvailableRooms,
-  getRoomTypes,
-  getReservations,
+  getAllReservations,
   getReservationById,
   createReservation,
-  updateReservationStatus,
+  updateReservation,
   amendReservationPrice,
-  recordPayment,
-  getCustomers,
-  getDashboardStats,
+  updateGuestIdImage,
+  checkInReservation,
+  addPayment,
+  checkOutReservation,
+  cancelReservation,
+  isRoomAvailable,
+  getReservationReports
 };
+
 

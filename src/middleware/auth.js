@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+﻿const jwt = require('jsonwebtoken');
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -13,18 +13,26 @@ function authMiddleware(req, res, next) {
     req.user = decoded;
     next();
   } catch (err) {
-    return res.status(403).json({ success: false, message: 'Invalid or expired token' });
+    return res.status(401).json({ success: false, message: 'Invalid or expired token' });
   }
 }
 
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: 'Insufficient permissions' });
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
     }
-    next();
+    // Admin always has access
+    if (req.user.role === 'admin' || roles.length === 0 || roles.includes(req.user.role)) {
+      return next();
+    }
+    return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   };
 }
 
-module.exports = { authMiddleware, requireRole };
-
+module.exports = {
+  authMiddleware,
+  requireRole,
+  authenticate: authMiddleware,
+  authorize: requireRole,
+};
