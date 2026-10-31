@@ -106,6 +106,17 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
+// Database manual migration trigger
+app.get('/api/migrate', async (req, res) => {
+  try {
+    const { initializeDatabase } = require('./database/init');
+    await initializeDatabase();
+    res.json({ success: true, message: 'Database schema and column migrations completed successfully.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomsRoutes);

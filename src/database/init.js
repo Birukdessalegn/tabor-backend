@@ -1,4 +1,4 @@
-﻿const pool = require('./pool');
+const pool = require('./pool');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
@@ -8,41 +8,63 @@ async function initializeDatabase() {
   try {
     console.log('Initializing Tabor database schema & migrations...');
 
+    // Run safe migrations first so table alterations always succeed
+    const migrations = [
+      "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS notes TEXT",
+      "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS description TEXT",
+      "ALTER TABLE room_types ADD COLUMN IF NOT EXISTS capacity INTEGER DEFAULT 2",
+      "ALTER TABLE room_types ADD COLUMN IF NOT EXISTS max_occupancy INTEGER DEFAULT 2",
+      "ALTER TABLE room_types ADD COLUMN IF NOT EXISTS image_url TEXT",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_name VARCHAR(150)",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_phone VARCHAR(50)",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_email VARCHAR(150)",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_id_number VARCHAR(100)",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_url TEXT",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_front_url TEXT",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_back_url TEXT",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS actual_check_in_at TIMESTAMP",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS actual_check_out_at TIMESTAMP",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS total_nights INTEGER DEFAULT 1",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12,2) DEFAULT 0",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS adults INTEGER DEFAULT 1",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS children INTEGER DEFAULT 0",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amendment_reason TEXT",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_by INTEGER",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_at TIMESTAMP",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS vip_customer_id INTEGER",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(100)",
+      "ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS receipt_image TEXT",
+      "ALTER TABLE room_payments ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(100)",
+      "ALTER TABLE room_payments ADD COLUMN IF NOT EXISTS receipt_image TEXT",
+      "UPDATE rooms SET notes = description WHERE notes IS NULL AND description IS NOT NULL",
+      "UPDATE rooms SET description = notes WHERE description IS NULL AND notes IS NOT NULL",
+    ];
+
+    for (const sql of migrations) {
+      try {
+        await client.query(sql);
+      } catch (e) {
+        // Ignored if table doesn't exist yet before schema.sql runs
+      }
+    }
+
     // Read and execute base schema
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf8');
-    await client.query(schema);
+    try {
+      await client.query(schema);
+    } catch (e) {
+      console.warn('Base schema notice:', e.message);
+    }
 
-    // Auto-migrations: ensure all Kasina-aligned columns exist
-    await client.query(`
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_name VARCHAR(150);
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_phone VARCHAR(50);
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_email VARCHAR(150);
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS guest_id_number VARCHAR(100);
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_url TEXT;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_front_url TEXT;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS id_image_back_url TEXT;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS actual_check_in_at TIMESTAMP;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS actual_check_out_at TIMESTAMP;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS total_nights INTEGER DEFAULT 1;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12,2) DEFAULT 0;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS adults INTEGER DEFAULT 1;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS children INTEGER DEFAULT 0;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amendment_reason TEXT;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_by INTEGER;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS price_amended_at TIMESTAMP;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS vip_customer_id INTEGER;
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(100);
-      ALTER TABLE room_reservations ADD COLUMN IF NOT EXISTS receipt_image TEXT;
-
-      ALTER TABLE room_payments ADD COLUMN IF NOT EXISTS transaction_reference VARCHAR(100);
-      ALTER TABLE room_payments ADD COLUMN IF NOT EXISTS receipt_image TEXT;
-
-      ALTER TABLE room_types ADD COLUMN IF NOT EXISTS capacity INTEGER DEFAULT 2;
-      ALTER TABLE room_types ADD COLUMN IF NOT EXISTS image_url TEXT;
-
-      ALTER TABLE rooms ADD COLUMN IF NOT EXISTS notes TEXT;
-    `);
+    // Re-run migrations in case tables were just created by schema.sql
+    for (const sql of migrations) {
+      try {
+        await client.query(sql);
+      } catch (e) {
+        // Table or column already adjusted
+      }
+    }
 
     // Ensure rooms status check constraint allows 'cleaning'
     try {
