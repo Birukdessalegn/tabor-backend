@@ -36,9 +36,40 @@ async function createUser(req, res) {
     const user = await authService.createUser(req.body);
     res.status(201).json({ success: true, user });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(400).json({ success: false, message: err.message });
   }
 }
 
-module.exports = { login, getProfile, getUsers, createUser };
+async function updateUser(req, res) {
+  try {
+    const user = await authService.updateUser(req.params.id, req.body);
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+}
+
+async function resetPassword(req, res) {
+  try {
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ success: false, message: 'New password is required' });
+    }
+    const result = await authService.resetUserPassword(req.params.id, password);
+    res.json({ success: true, message: `Password for ${result.username} reset successfully` });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+}
+
+async function deleteUser(req, res) {
+  try {
+    const result = await authService.deleteUser(req.params.id, req.user.id);
+    res.json({ success: true, message: `User ${result.username} deleted successfully` });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
+}
+
+module.exports = { login, getProfile, getUsers, createUser, updateUser, resetPassword, deleteUser };
 
