@@ -298,11 +298,13 @@ const getRoomTypeById = async (id) => {
 
 const createRoomType = async ({ name, base_rate, capacity, max_occupancy, description, amenities }) => {
   const occVal = capacity || max_occupancy || 2;
-  const amenArr = Array.isArray(amenities)
-    ? amenities
-    : (typeof amenities === 'string' && amenities.trim()
-        ? amenities.split(',').map(s => s.trim()).filter(Boolean)
-        : []);
+  const amenVal = (amenities !== undefined && amenities !== null)
+    ? (Array.isArray(amenities)
+        ? (amenities.length > 0 ? amenities : null)
+        : (typeof amenities === 'string' && amenities.trim()
+            ? amenities.split(',').map(s => s.trim()).filter(Boolean)
+            : null))
+    : null;
 
   let row;
   const executeInsert = async (amenityParam) => {
@@ -328,10 +330,11 @@ const createRoomType = async ({ name, base_rate, capacity, max_occupancy, descri
   };
 
   try {
-    row = await executeInsert(amenArr);
+    row = await executeInsert(amenVal);
   } catch (err) {
-    if (err.message.includes('array') || err.message.includes('type text')) {
-      row = await executeInsert(amenArr.join(', '));
+    if (amenVal && (err.message.includes('array') || err.message.includes('type text'))) {
+      const fallbackStr = Array.isArray(amenVal) ? amenVal.join(', ') : String(amenVal);
+      row = await executeInsert(fallbackStr);
     } else {
       throw err;
     }
@@ -346,11 +349,11 @@ const createRoomType = async ({ name, base_rate, capacity, max_occupancy, descri
 
 const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, description, amenities }) => {
   const occVal = capacity || max_occupancy || null;
-  const amenArr = amenities !== undefined
+  const amenVal = amenities !== undefined
     ? (Array.isArray(amenities)
-        ? amenities
-        : (typeof amenities === 'string' ? amenities.split(',').map(s => s.trim()).filter(Boolean) : []))
-    : null;
+        ? (amenities.length > 0 ? amenities : null)
+        : (typeof amenities === 'string' && amenities.trim() ? amenities.split(',').map(s => s.trim()).filter(Boolean) : null))
+    : undefined;
 
   const executeUpdate = async (amenityParam) => {
     const query = `
@@ -369,7 +372,7 @@ const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, de
       base_rate || null,
       occVal,
       description !== undefined ? description : null,
-      amenityParam,
+      amenityParam !== undefined ? amenityParam : null,
       id
     ]);
     return res.rows[0];
@@ -377,7 +380,22 @@ const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, de
 
   let row;
   try {
-    row = await executeUpdate(amenArr);
+    row = await executeUpdate(amenVal);
+  } catch (err) {
+    if (amenVal && (err.message.includes('array') || err.message.includes('type text'))) {
+      const fallbackStr = Array.isArray(amenVal) ? amenVal.join(', ') : String(amenVal);
+      row = await executeUpdate(fallbackStr);
+    } else {
+      throw err;
+    }
+  }
+
+  if (row) {
+    row.capacity = row.max_occupancy;
+    row.image_url = '';
+  }
+  return row;
+};
   } catch (err) {
     if (amenArr && (err.message.includes('array') || err.message.includes('type text'))) {
       row = await executeUpdate(amenArr.join(', '));
