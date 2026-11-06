@@ -298,34 +298,40 @@ const getRoomTypeById = async (id) => {
 
 const createRoomType = async ({ name, base_rate, capacity, max_occupancy, description, amenities }) => {
   const occVal = capacity || max_occupancy || 2;
-  const amenVal = Array.isArray(amenities) ? amenities.join(", ") : (amenities || "");
-  const values = [
-    name.trim(),
-    base_rate,
-    occVal,
-    description || null,
-    amenVal
-  ];
+  const amenArr = Array.isArray(amenities)
+    ? amenities
+    : (typeof amenities === 'string' && amenities.trim()
+        ? amenities.split(',').map(s => s.trim()).filter(Boolean)
+        : []);
 
   let row;
-  try {
-    const query = `
-      INSERT INTO room_types (name, base_rate, max_occupancy, description, amenities)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
-    `;
-    const res = await pool.query(query, values);
-    row = res.rows[0];
-  } catch (err) {
-    // If sequence permission is restricted, auto-assign next ID safely
-    if (err.message.includes('sequence') || err.code === '42501') {
-      const fallbackQuery = `
-        INSERT INTO room_types (id, name, base_rate, max_occupancy, description, amenities)
-        VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM room_types), $1, $2, $3, $4, $5)
+  const executeInsert = async (amenityParam) => {
+    const values = [name.trim(), base_rate, occVal, description || null, amenityParam];
+    try {
+      const res = await pool.query(`
+        INSERT INTO room_types (name, base_rate, max_occupancy, description, amenities)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
-      `;
-      const res = await pool.query(fallbackQuery, values);
-      row = res.rows[0];
+      `, values);
+      return res.rows[0];
+    } catch (err) {
+      if (err.message.includes('sequence') || err.code === '42501') {
+        const res = await pool.query(`
+          INSERT INTO room_types (id, name, base_rate, max_occupancy, description, amenities)
+          VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM room_types), $1, $2, $3, $4, $5)
+          RETURNING *
+        `, values);
+        return res.rows[0];
+      }
+      throw err;
+    }
+  };
+
+  try {
+    row = await executeInsert(amenArr);
+  } catch (err) {
+    if (err.message.includes('array') || err.message.includes('type text')) {
+      row = await executeInsert(amenArr.join(', '));
     } else {
       throw err;
     }
@@ -340,26 +346,46 @@ const createRoomType = async ({ name, base_rate, capacity, max_occupancy, descri
 
 const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, description, amenities }) => {
   const occVal = capacity || max_occupancy || null;
-  const query = `
-    UPDATE room_types
-    SET 
-      name = COALESCE($1, name),
-      base_rate = COALESCE($2, base_rate),
-      max_occupancy = COALESCE($3, max_occupancy),
-      description = COALESCE($4, description),
-      amenities = COALESCE($5, amenities)
-    WHERE id = $6
-    RETURNING *
-  `;
-  const { rows } = await pool.query(query, [
-    name ? name.trim() : null,
-    base_rate || null,
-    occVal,
-    description !== undefined ? description : null,
-    amenities !== undefined ? (Array.isArray(amenities) ? amenities : []) : null,
-    id
-  ]);
-  const row = rows[0];
+  const amenArr = amenities !== undefined
+    ? (Array.isArray(amenities)
+        ? amenities
+        : (typeof amenities === 'string' ? amenities.split(',').map(s => s.trim()).filter(Boolean) : []))
+    : null;
+
+  const executeUpdate = async (amenityParam) => {
+    const query = `
+      UPDATE room_types
+      SET 
+        name = COALESCE($1, name),
+        base_rate = COALESCE($2, base_rate),
+        max_occupancy = COALESCE($3, max_occupancy),
+        description = COALESCE($4, description),
+        amenities = COALESCE($5, amenities)
+      WHERE id = $6
+      RETURNING *
+    `;
+    const res = await pool.query(query, [
+      name ? name.trim() : null,
+      base_rate || null,
+      occVal,
+      description !== undefined ? description : null,
+      amenityParam,
+      id
+    ]);
+    return res.rows[0];
+  };
+
+  let row;
+  try {
+    row = await executeUpdate(amenArr);
+  } catch (err) {
+    if (amenArr && (err.message.includes('array') || err.message.includes('type text'))) {
+      row = await executeUpdate(amenArr.join(', '));
+    } else {
+      throw err;
+    }
+  }
+
   if (row) {
     row.capacity = row.max_occupancy;
     row.image_url = '';
