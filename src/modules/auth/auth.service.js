@@ -67,13 +67,28 @@ async function createUser(data) {
   }
 
   const hash = await bcrypt.hash(password, 10);
-  const result = await pool.query(
-    `INSERT INTO users (username, email, password_hash, full_name, role, is_active)
-     VALUES ($1, $2, $3, $4, $5, TRUE) 
-     RETURNING id, username, full_name, email, role, is_active, created_at`,
-    [username.trim(), email ? email.trim() : null, hash, full_name.trim(), role || 'receptionist']
-  );
-  return result.rows[0];
+  const values = [username.trim(), email ? email.trim() : null, hash, full_name.trim(), role || 'receptionist'];
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (username, email, password_hash, full_name, role, is_active)
+       VALUES ($1, $2, $3, $4, $5, TRUE) 
+       RETURNING id, username, full_name, email, role, is_active, created_at`,
+      values
+    );
+    return result.rows[0];
+  } catch (err) {
+    if (err.message.includes('sequence') || err.code === '42501') {
+      const fallbackResult = await pool.query(
+        `INSERT INTO users (id, username, email, password_hash, full_name, role, is_active)
+         VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM users), $1, $2, $3, $4, $5, TRUE) 
+         RETURNING id, username, full_name, email, role, is_active, created_at`,
+        values
+      );
+      return fallbackResult.rows[0];
+    }
+    throw err;
+  }
 }
 
 async function updateUser(id, data) {

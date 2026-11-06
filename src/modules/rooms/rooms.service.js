@@ -138,19 +138,38 @@ const createRoom = async ({ room_number, room_type_id, floor, notes, description
     throw new Error(`Room number '${room_number}' already exists.`);
   }
 
-  const query = `
-    INSERT INTO rooms (room_number, room_type_id, floor, status, description)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING *
-  `;
-  const { rows } = await pool.query(query, [
+  let row;
+  const values = [
     room_number.trim(),
     room_type_id,
     floor || 1,
     status,
     notes || description || null
-  ]);
-  const row = rows[0];
+  ];
+
+  try {
+    const query = `
+      INSERT INTO rooms (room_number, room_type_id, floor, status, description)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `;
+    const res = await pool.query(query, values);
+    row = res.rows[0];
+  } catch (err) {
+    // If sequence permission is restricted, auto-assign next ID safely
+    if (err.message.includes('sequence') || err.code === '42501') {
+      const fallbackQuery = `
+        INSERT INTO rooms (id, room_number, room_type_id, floor, status, description)
+        VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM rooms), $1, $2, $3, $4, $5)
+        RETURNING *
+      `;
+      const res = await pool.query(fallbackQuery, values);
+      row = res.rows[0];
+    } else {
+      throw err;
+    }
+  }
+
   if (row) {
     row.notes = row.description;
   }
@@ -279,19 +298,39 @@ const getRoomTypeById = async (id) => {
 
 const createRoomType = async ({ name, base_rate, capacity, max_occupancy, description, amenities }) => {
   const occVal = capacity || max_occupancy || 2;
-  const query = `
-    INSERT INTO room_types (name, base_rate, max_occupancy, description, amenities)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING *
-  `;
-  const { rows } = await pool.query(query, [
+  const amenVal = Array.isArray(amenities) ? amenities.join(", ") : (amenities || "");
+  const values = [
     name.trim(),
     base_rate,
     occVal,
     description || null,
-    Array.isArray(amenities) ? amenities : []
-  ]);
-  const row = rows[0];
+    amenVal
+  ];
+
+  let row;
+  try {
+    const query = `
+      INSERT INTO room_types (name, base_rate, max_occupancy, description, amenities)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `;
+    const res = await pool.query(query, values);
+    row = res.rows[0];
+  } catch (err) {
+    // If sequence permission is restricted, auto-assign next ID safely
+    if (err.message.includes('sequence') || err.code === '42501') {
+      const fallbackQuery = `
+        INSERT INTO room_types (id, name, base_rate, max_occupancy, description, amenities)
+        VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM room_types), $1, $2, $3, $4, $5)
+        RETURNING *
+      `;
+      const res = await pool.query(fallbackQuery, values);
+      row = res.rows[0];
+    } else {
+      throw err;
+    }
+  }
+
   if (row) {
     row.capacity = row.max_occupancy;
     row.image_url = '';

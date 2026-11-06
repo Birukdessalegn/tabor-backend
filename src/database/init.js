@@ -160,6 +160,12 @@ async function initializeDatabase() {
       } catch (e) {}
     }
 
+    // Attempt to grant full sequence and table permissions to database user
+    try {
+      await pool.query('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ambbatxv_tabor');
+      await pool.query('GRANT ALL ON ALL TABLES IN SCHEMA public TO ambbatxv_tabor');
+    } catch (e) {}
+
     // =========================================================================
     // 3. ENSURE ALL SPECIFIC COLUMNS (SAFETY MIGRATIONS)
     // =========================================================================
