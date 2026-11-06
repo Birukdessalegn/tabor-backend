@@ -70,16 +70,16 @@ app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
-// Auto-sync full database schema on incoming requests
-const { syncFullSchema } = require("./database/syncSchema");
-let schemaSynced = false;
+// Auto-initialize & sync full database schema on incoming requests
+const { initializeDatabase } = require("./database/init");
+let dbInitialized = false;
 app.use(async (req, res, next) => {
-  if (!schemaSynced) {
+  if (!dbInitialized) {
     try {
-      await syncFullSchema();
-      schemaSynced = true;
+      await initializeDatabase();
+      dbInitialized = true;
     } catch (e) {
-      console.warn("Auto-sync notice:", e.message);
+      console.warn("Auto-init notice:", e.message);
     }
   }
   next();
@@ -96,10 +96,20 @@ app.get('/api/health', (req, res) => {
   res.json({ success: true, system: 'Tabor Hotel', version: '1.0.0', timestamp: new Date().toISOString() });
 });
 
+// Direct Database Initialization & Table Creation Endpoint
+app.get('/api/init-db', async (req, res) => {
+  try {
+    const result = await initializeDatabase();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Schema full sync manual endpoint
 app.get('/api/sync-schema', async (req, res) => {
   try {
-    const result = await syncFullSchema();
+    const result = await initializeDatabase();
     res.json(result);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
