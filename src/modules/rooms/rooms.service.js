@@ -396,20 +396,6 @@ const updateRoomType = async (id, { name, base_rate, capacity, max_occupancy, de
   }
   return row;
 };
-  } catch (err) {
-    if (amenArr && (err.message.includes('array') || err.message.includes('type text'))) {
-      row = await executeUpdate(amenArr.join(', '));
-    } else {
-      throw err;
-    }
-  }
-
-  if (row) {
-    row.capacity = row.max_occupancy;
-    row.image_url = '';
-  }
-  return row;
-};
 
 const deleteRoomType = async (id) => {
   const roomsCount = await pool.query("SELECT COUNT(*) FROM rooms WHERE room_type_id = $1", [id]);
